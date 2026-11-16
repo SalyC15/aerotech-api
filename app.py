@@ -31,6 +31,8 @@ from decimal import Decimal
 from functools import wraps
 from xml.etree import ElementTree as ET
 
+import threading
+
 import jwt
 import psycopg2
 import psycopg2.extras
@@ -51,22 +53,80 @@ IVA = Decimal("0.15")
 
 
 # ---------------------------------------------------------------- utilidades
-def get_conn():
+_POOL_MAX = int(os.environ.get("DB_POOL_MAX", "4"))
+_pool = None
+_pool_lock = threading.Lock()
+_pool_cupo = threading.BoundedSemaphore(_POOL_MAX)
+
+
+def _crear_conn():
     extra = {"sslmode": os.environ["DB_SSLMODE"]} if os.environ.get("DB_SSLMODE") else {}
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor, **extra)
 
 
+def get_conn():
+    """Conexión reutilizada de un pool. Abrir una conexión SSL nueva a Supabase en cada
+    petición costaba cerca de un segundo; reutilizarla hace las respuestas mucho más rápidas."""
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            _pool = []
+    _pool_cupo.acquire()  # espera si ya hay _POOL_MAX conexiones en uso
+    try:
+        while True:
+            with _pool_lock:
+                conn = _pool.pop() if _pool else None
+            if conn is None:
+                return _crear_conn()
+            try:
+                if conn.closed:
+                    continue
+                with conn.cursor() as c:  # comprueba que la conexión sigue viva
+                    c.execute("select 1")
+                conn.rollback()
+                return conn
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    except Exception:
+        _pool_cupo.release()
+        raise
+
+
+def soltar_conn(conn, descartar=False):
+    try:
+        if not descartar and not conn.closed:
+            conn.rollback()
+            with _pool_lock:
+                _pool.append(conn)
+        else:
+            conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    finally:
+        _pool_cupo.release()
+
+
 @contextmanager
 def db():
-    """Una transacción por petición: confirma al salir bien, deshace si hay error
-    y SIEMPRE cierra la conexión (importante con muchas consultas simultáneas)."""
+    """Una transacción por petición: confirma al salir bien, deshace si hay error.
+    La conexión vuelve al pool (o se descarta si quedó dañada)."""
     conn = get_conn()
+    malo = False
     try:
         with conn:
             with conn.cursor() as cur:
                 yield cur
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        malo = True
+        raise
     finally:
-        conn.close()
+        soltar_conn(conn, descartar=malo)
 
 
 def serializar(valor):
