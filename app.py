@@ -663,12 +663,10 @@ def patron_like(texto):
 
 
 @app.get("/api/vuelos")
-@requiere_token
 def listar_vuelos():
-    # El cliente solo ve vuelos con asientos; el administrador ve todos.
+    # El catálogo es público para que se pueda consultar antes de autenticarse.
     filtros, params = [], []
-    if g.rol != "administrador":
-        filtros.append("asientos_disponibles > 0")
+    filtros.append("asientos_disponibles > 0")
     for campo in ("origen", "destino"):
         valor = (request.args.get(campo) or "").strip()
         if valor:
