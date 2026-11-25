@@ -339,6 +339,11 @@ def validar_vuelo(d, parcial=False):
     return out, None
 
 
+def vuelo_en_fecha_pasada(vuelo):
+    """Indica si el vuelo tiene una fecha anterior al día actual."""
+    return vuelo["fecha"] < dt.date.today()
+
+
 def validar_distribucion(capacidad, primera, ejecutiva):
     """Devuelve un mensaje de error si las cabinas no caben en el avión."""
     economica = capacidad - primera - ejecutiva
@@ -694,6 +699,8 @@ def crear_vuelo():
     datos, msg = validar_vuelo(request.get_json(silent=True) or {})
     if msg:
         return error(msg)
+    if datos["fecha"] < dt.date.today():
+        return error("No se pueden crear vuelos con fechas pasadas")
     msg = validar_distribucion(datos["capacidad"], datos["asientos_primera"], datos["asientos_ejecutiva"])
     if msg:
         return error(msg)
@@ -727,6 +734,10 @@ def actualizar_vuelo(vuelo_id):
         actual = cur.fetchone()
         if not actual:
             return error("Vuelo no encontrado", 404)
+        if vuelo_en_fecha_pasada(actual):
+            return error("No se pueden modificar vuelos con fechas pasadas", 409)
+        if datos.get("fecha", actual["fecha"]) < dt.date.today():
+            return error("No se puede asignar una fecha pasada al vuelo")
         origen = datos.get("origen", actual["origen"])
         destino = datos.get("destino", actual["destino"])
         if origen.lower() == destino.lower():
@@ -781,6 +792,12 @@ def _reduccion_imposible(e):
 @requiere_rol("administrador")
 def eliminar_vuelo(vuelo_id):
     with db() as cur:
+        cur.execute("select fecha from vuelos where id = %s", (vuelo_id,))
+        vuelo = cur.fetchone()
+        if not vuelo:
+            return error("Vuelo no encontrado", 404)
+        if vuelo_en_fecha_pasada(vuelo):
+            return error("No se pueden eliminar vuelos con fechas pasadas", 409)
         cur.execute("select count(*) as n from reservas where vuelo_id = %s", (vuelo_id,))
         if cur.fetchone()["n"] > 0:
             return error("El vuelo tiene reservas y no se puede eliminar", 409)
@@ -859,6 +876,9 @@ def retener_asientos(vuelo_id):
         cur.execute("select id from vuelos where id = %s", (vuelo_id,))
         if not cur.fetchone():
             return error("Vuelo no encontrado", 404)
+        cur.execute("select fecha from vuelos where id = %s", (vuelo_id,))
+        if vuelo_en_fecha_pasada(cur.fetchone()):
+            return error("No se pueden reservar asientos para vuelos con fechas pasadas", 409)
         filas = bloquear_asientos(cur, vuelo_id, codigos, g.usuario_id)
         inexistentes, no_disponibles = conflictos_asientos(filas, codigos, g.usuario_id)
         if inexistentes or no_disponibles:
@@ -1017,6 +1037,8 @@ def cotizar():
             v = cur.fetchone()
             if not v:
                 return error(f"Vuelo {it['vuelo_id']} no encontrado", 404)
+            if vuelo_en_fecha_pasada(v):
+                return error(f"No se puede cotizar el vuelo {it['vuelo_id']} porque su fecha ya pasó", 409)
             codigos = [p["asiento"] for p in it["pasajeros"]]
             cur.execute(
                 "select codigo, clase, estado, reserva_id, retenido_por, "
@@ -1064,6 +1086,9 @@ def crear_compra():
         faltan = [i for i in ids if i not in vuelos]
         if faltan:
             return error(f"Vuelo {faltan[0]} no encontrado", 404)
+        pasados = [v_id for v_id, v in vuelos.items() if vuelo_en_fecha_pasada(v)]
+        if pasados:
+            return error(f"No se puede comprar: el vuelo {pasados[0]} tiene fecha pasada", 409)
         cur.execute(
             "insert into compras (usuario_id, nombres, apellidos, tipo_documento, documento, "
             "correo, direccion) values (%s, %s, %s, %s, %s, %s, %s) returning id, fecha",
@@ -1108,6 +1133,8 @@ def crear_reserva():
         vuelo = cur.fetchone()
         if not vuelo:
             return error("Vuelo no encontrado", 404)
+        if vuelo_en_fecha_pasada(vuelo):
+            return error("No se pueden reservar vuelos con fechas pasadas", 409)
         if pasajeros is None:
             bloquear_asientos(cur, vuelo_id, [], g.usuario_id)
             codigos = asientos_auto(cur, vuelo_id, cantidad, g.usuario_id)
@@ -1219,6 +1246,8 @@ def actualizar_reserva(reserva_id):
         vuelo_id = fila["vuelo_id"]
         cur.execute("select * from vuelos where id = %s for update", (vuelo_id,))
         vuelo = cur.fetchone()
+        if vuelo and vuelo_en_fecha_pasada(vuelo):
+            return error("No se pueden modificar reservas de vuelos con fechas pasadas", 409)
         r = obtener_reserva(cur, reserva_id)          # se lee DESPUÉS de bloquear el vuelo
         if r["estado"] != "confirmada":
             return error("Solo se pueden modificar reservas confirmadas", 409)
@@ -1316,7 +1345,10 @@ def cancelar_reserva(reserva_id):
         if not fila:
             return error("Reserva no encontrada", 404)
         vuelo_id = fila["vuelo_id"]
-        cur.execute("select id from vuelos where id = %s for update", (vuelo_id,))
+        cur.execute("select id, fecha from vuelos where id = %s for update", (vuelo_id,))
+        vuelo = cur.fetchone()
+        if vuelo and vuelo_en_fecha_pasada(vuelo):
+            return error("No se pueden cancelar reservas de vuelos con fechas pasadas", 409)
         bloquear_asientos(cur, vuelo_id, [], g.usuario_id, reserva_id)
         # UPDATE condicional: si dos cancelaciones llegan a la vez, solo una encuentra
         # la reserva 'confirmada'; la otra recibe 0 filas (no se devuelven asientos dos veces).
