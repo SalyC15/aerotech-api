@@ -697,8 +697,15 @@ def listar_vuelos():
 @requiere_token
 @requiere_rol("administrador")
 def listar_vuelos_admin():
-    """El administrador puede consultar el historial completo de vuelos."""
+    """El administrador puede consultar vuelos próximos o el historial pasado."""
     filtros, params = [], []
+    periodo = request.args.get("periodo")
+    if periodo == "pasados":
+        filtros.append("fecha < %s")
+        params.append(dt.date.today())
+    elif periodo == "proximos":
+        filtros.append("fecha >= %s")
+        params.append(dt.date.today())
     for campo in ("origen", "destino"):
         valor = (request.args.get(campo) or "").strip()
         if valor:
@@ -709,8 +716,11 @@ def listar_vuelos_admin():
         filtros.append("fecha = %s")
         params.append(fecha)
     donde = f" where {' and '.join(filtros)}" if filtros else ""
+    orden = "desc" if periodo == "pasados" else "asc"
     with db() as cur:
-        cur.execute(f"select * from vuelos{donde} order by fecha, hora_salida", params)
+        cur.execute(
+            f"select * from vuelos{donde} order by fecha {orden}, hora_salida {orden}", params
+        )
         filas = [fila_a_dict(f) for f in cur.fetchall()]
     datos = {"vuelos": filas}
     if not filas:
