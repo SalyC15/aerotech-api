@@ -669,9 +669,10 @@ def patron_like(texto):
 
 @app.get("/api/vuelos")
 def listar_vuelos():
-    # El catálogo es público para que se pueda consultar antes de autenticarse.
+    # Catálogo público: solo vuelos vigentes/próximos que aún tienen asientos.
     filtros, params = [], []
-    filtros.append("asientos_disponibles > 0")
+    filtros.append("fecha >= %s")
+    params.append(dt.date.today())
     for campo in ("origen", "destino"):
         valor = (request.args.get(campo) or "").strip()
         if valor:
@@ -685,6 +686,31 @@ def listar_vuelos():
     sql = f"select * from vuelos{donde} order by fecha, hora_salida"
     with db() as cur:
         cur.execute(sql, params)
+        filas = [fila_a_dict(f) for f in cur.fetchall()]
+    datos = {"vuelos": filas}
+    if not filas:
+        datos["mensaje"] = "Vuelo no encontrado"
+    return responder(datos, raiz="vuelos")
+
+
+@app.get("/api/admin/vuelos")
+@requiere_token
+@requiere_rol("administrador")
+def listar_vuelos_admin():
+    """El administrador puede consultar el historial completo de vuelos."""
+    filtros, params = [], []
+    for campo in ("origen", "destino"):
+        valor = (request.args.get(campo) or "").strip()
+        if valor:
+            filtros.append(f"{campo} ilike %s escape '\\'")
+            params.append(patron_like(valor))
+    fecha = (request.args.get("fecha") or "").strip()
+    if fecha:
+        filtros.append("fecha = %s")
+        params.append(fecha)
+    donde = f" where {' and '.join(filtros)}" if filtros else ""
+    with db() as cur:
+        cur.execute(f"select * from vuelos{donde} order by fecha, hora_salida", params)
         filas = [fila_a_dict(f) for f in cur.fetchall()]
     datos = {"vuelos": filas}
     if not filas:
